@@ -182,6 +182,8 @@ func (tx *Transaction) decodeTyped(b []byte) (TxData, error) {
 	}
 }
 
+func (tx *Transaction) SeenTime() time.Time { return tx.time }
+
 // setDecoded sets the inner transaction and size after decoding.
 func (tx *Transaction) setDecoded(inner TxData, size int) {
 	tx.inner = inner

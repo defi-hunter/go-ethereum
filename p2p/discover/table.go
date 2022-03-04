@@ -40,7 +40,7 @@ import (
 
 const (
 	alpha           = 3  // Kademlia concurrency factor
-	bucketSize      = 16 // Kademlia bucket size
+	bucketSize      = 32 // Kademlia bucket size
 	maxReplacements = 10 // Size of per-bucket replacement list
 
 	// We keep buckets for the upper 1/15 of distances because
@@ -53,7 +53,7 @@ const (
 	bucketIPLimit, bucketSubnet = 2, 24 // at most 2 addresses from the same /24
 	tableIPLimit, tableSubnet   = 10, 24
 
-	refreshInterval    = 30 * time.Minute
+	refreshInterval    = 3 * time.Minute
 	revalidateInterval = 10 * time.Second
 	copyNodesInterval  = 30 * time.Second
 	seedMinTableTime   = 5 * time.Minute
@@ -217,8 +217,10 @@ func (tab *Table) refresh() <-chan struct{} {
 // loop schedules runs of doRefresh, doRevalidate and copyLiveNodes.
 func (tab *Table) loop() {
 	var (
+		refreshNum = 0
+		curRefreshInterval = time.Second
 		revalidate     = time.NewTimer(tab.nextRevalidateTime())
-		refresh        = time.NewTicker(refreshInterval)
+		refresh        = time.NewTicker(curRefreshInterval)
 		copyNodes      = time.NewTicker(copyNodesInterval)
 		refreshDone    = make(chan struct{})           // where doRefresh reports completion
 		revalidateDone chan struct{}                   // where doRevalidate reports completion
@@ -237,6 +239,11 @@ loop:
 		case <-refresh.C:
 			tab.seedRand()
 			if refreshDone == nil {
+				refreshNum++
+				if curRefreshInterval < refreshInterval && refreshNum % 8 == 0 {
+					curRefreshInterval = curRefreshInterval + time.Second
+					refresh.Reset(curRefreshInterval)
+				}
 				refreshDone = make(chan struct{})
 				go tab.doRefresh(refreshDone)
 			}

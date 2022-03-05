@@ -49,6 +49,16 @@ type Transaction struct {
 	inner TxData    // Consensus contents of a transaction
 	time  time.Time // Time first seen locally (spam avoidance)
 
+	fromNode string
+	hashTime time.Time
+	addPool time.Time
+	queued time.Time
+	pending time.Time
+	executable time.Time
+	picked time.Time
+	beforeExecute time.Time
+	afterExecute time.Time
+
 	// caches
 	hash atomic.Value
 	size atomic.Value
@@ -182,7 +192,33 @@ func (tx *Transaction) decodeTyped(b []byte) (TxData, error) {
 	}
 }
 
+func (tx* Transaction) FromNode() string { return tx.fromNode }
+func (tx *Transaction) HashTime() time.Time { return tx.hashTime }
 func (tx *Transaction) SeenTime() time.Time { return tx.time }
+func (tx *Transaction) AddPoolTime() time.Time { return tx.addPool }
+func (tx *Transaction) QueuedTime() time.Time { return tx.queued }
+func (tx *Transaction) PendingTime() time.Time { return tx.pending }
+func (tx *Transaction) PickedTime() time.Time { return tx.picked }
+func (tx *Transaction) BeforExecTime() time.Time { return tx.beforeExecute }
+func (tx *Transaction) AfterExecTime() time.Time { return tx.afterExecute }
+
+func (tx* Transaction) SetFromNode(from string) { tx.fromNode = from }
+func (tx *Transaction) SetAddPoolTime(t time.Time) { tx.addPool = t }
+func (tx *Transaction) SetQueuedTime(t time.Time) { tx.queued = t }
+func (tx *Transaction) SetPendingTime(t time.Time) { tx.pending = t }
+func (tx *Transaction) SetPickedTime(t time.Time) { tx.picked = t }
+func (tx *Transaction) SetBeforExecTime(t time.Time) { tx.beforeExecute = t }
+func (tx *Transaction) SetAfterExecTime(t time.Time) { tx.afterExecute = t }
+
+func (tx* Transaction) IsFetched() bool { return tx.time != tx.hashTime }
+
+func (tx *Transaction) SetHashTime(t time.Time) {
+	if t.After(tx.time) {
+		tx.hashTime = tx.time
+	} else {
+		tx.hashTime = t
+	}
+}
 
 // setDecoded sets the inner transaction and size after decoding.
 func (tx *Transaction) setDecoded(inner TxData, size int) {

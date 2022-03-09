@@ -24,7 +24,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/log"
+
+	//"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -130,11 +131,11 @@ func Sender(signer Signer, tx *Transaction) (common.Address, error) {
 		// If the signer used to derive from in a previous
 		// call is not the same as used current, invalidate
 		// the cache.
-		if sigCache.signer.Equal(signer) || signer.Equal(sigCache.signer) {
+		if sigCache.signer.Equal(signer) {
 			return sigCache.from, nil
 		}
 
-		log.Info("signed invalidated", "tx", tx.Hash().Hex(), "cached signer", fmt.Sprintf("%T", sigCache.signer), "signer", fmt.Sprintf("%T", signer))
+		//log.Info("signed invalidated", "tx", tx.Hash().Hex(), "cached signer", fmt.Sprintf("%T", sigCache.signer), "signer", fmt.Sprintf("%T", signer))
 	}
 
 	addr, err := signer.Sender(tx)
@@ -471,10 +472,6 @@ func WrapWithCachedSigner(signer Signer, cache SenderCache) *CachedSigner {
 		Signer: signer,
 		cache:  cache,
 	}
-}
-
-func (s CachedSigner) Equal(s2 Signer) bool {
-	return s.Signer.Equal(s2)
 }
 
 func (cs CachedSigner) Sender(tx *Transaction) (common.Address, error) {

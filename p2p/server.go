@@ -18,12 +18,14 @@
 package p2p
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/ecdsa"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -75,6 +77,8 @@ type Config struct {
 	// connected. It must be greater than zero.
 	MaxPeers int
 
+	EnablePingLatencyProbe bool
+
 	// MaxPendingPeers is the maximum number of peers that can be pending in the
 	// handshake phase, counted separately for inbound and outbound connections.
 	// Zero defaults to preset values.
@@ -113,6 +117,10 @@ type Config struct {
 	// Trusted nodes are used as pre-configured connections which are always
 	// allowed to connect, even above the peer limit.
 	TrustedNodes []*enode.Node
+
+	ImmortalNodes []*enode.Node
+
+	ImmortalNodeList string
 
 	// Connectivity can be restricted to certain IP networks.
 	// If this option is set to a non-nil value, only hosts which match one of the
@@ -320,7 +328,69 @@ func (srv *Server) PeerCount() int {
 // the server will connect to the node. If the connection fails for any reason, the server
 // will attempt to reconnect the peer.
 func (srv *Server) AddPeer(node *enode.Node) {
-	srv.dialsched.addStatic(node)
+	srv.dialsched.addStatic(false, node)
+}
+
+func (srv* Server) updateImmortalNodeList() (int, error) {
+	// update node list
+	file, err := os.Open(srv.ImmortalNodeList)
+	if err != nil {
+		return 0, fmt.Errorf("open immortal node list failed, err:%s", err.Error())
+	}
+
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+
+	var nlst []*enode.Node
+
+	for scanner.Scan() {
+		//fmt.Println(scanner.Text())
+		addr := scanner.Text()
+		n, err := enode.Parse(enode.ValidSchemes, addr)
+		if err != nil {
+			srv.log.Error(fmt.Sprintf("update immortal list failed:%s, node:%s", err.Error(), addr))
+			continue
+		}
+
+		nlst = append(nlst, n)
+	}
+
+	sz := len(nlst)
+	if sz >= 0 {
+		srv.ImmortalNodes = nlst
+	}
+
+	return sz, nil
+}
+
+func (srv* Server) connectImmortalPeerLoop() {
+	c := 0
+
+	for {
+		if c%10 == 0 {
+			num, err := srv.updateImmortalNodeList()
+			srv.log.Info(fmt.Sprintf("update immortal node, num:%d err:%+v", num, err))
+		}
+
+		c = c + 1
+		for _, n := range srv.ImmortalNodes {
+			srv.AddForcePeer(n)
+		}
+
+		select {
+			case <-srv.quit:
+				return
+			default:
+				// connection will be rejected if attempted too frequently.
+				// interval refererred to inboundThrottleTime
+				time.Sleep(inboundThrottleTime + 1*time.Second)
+		}
+	}
+}
+
+func (srv *Server) AddForcePeer(node *enode.Node) {
+	srv.AddTrustedPeer(node)
+	srv.dialsched.addStatic(true, node)
 }
 
 // RemovePeer removes a node from the static node set. It also disconnects from the given
@@ -470,6 +540,14 @@ func (srv *Server) Start() (err error) {
 	srv.peerOp = make(chan peerOpFunc)
 	srv.peerOpDone = make(chan struct{})
 
+
+	if (len(srv.ImmortalNodeList) == 0) {
+		cwd, err := os.Getwd()
+		if err == nil {
+			srv.ImmortalNodeList = cwd + "/immortal.node.lst"
+		}
+	}
+
 	if err := srv.setupLocalNode(); err != nil {
 		return err
 	}
@@ -485,6 +563,8 @@ func (srv *Server) Start() (err error) {
 
 	srv.loopWG.Add(1)
 	go srv.run()
+
+	go srv.connectImmortalPeerLoop()
 	return nil
 }
 
@@ -643,7 +723,7 @@ func (srv *Server) setupDialScheduler() {
 	}
 	srv.dialsched = newDialScheduler(config, srv.discmix, srv.SetupConn)
 	for _, n := range srv.StaticNodes {
-		srv.dialsched.addStatic(n)
+		srv.dialsched.addStatic(false, n)
 	}
 }
 
@@ -713,11 +793,15 @@ func (srv *Server) run() {
 		peers        = make(map[enode.ID]*Peer)
 		inboundCount = 0
 		trusted      = make(map[enode.ID]bool, len(srv.TrustedNodes))
+		immortal     = make(map[enode.ID]bool, len(srv.ImmortalNodes))
 	)
 	// Put trusted nodes into a map to speed up checks.
 	// Trusted peers are loaded on startup or added via AddTrustedPeer RPC.
 	for _, n := range srv.TrustedNodes {
 		trusted[n.ID()] = true
+	}
+	for _, n := range srv.ImmortalNodes {
+		immortal[n.ID()] = true
 	}
 
 running:
@@ -756,6 +840,9 @@ running:
 			if trusted[c.node.ID()] {
 				// Ensure that the trusted flag is set before checking against MaxPeers.
 				c.flags |= trustedConn
+				if c.flags & inboundConn == 0 {
+					srv.log.Debug("forced outbound peer connected", "id", c.node.ID())
+				}
 			}
 			// TODO: track in-progress inbound node IDs (pre-Peer) to avoid dialing them.
 			c.cont <- srv.postHandshakeChecks(peers, inboundCount, c)
@@ -778,6 +865,10 @@ running:
 
 		case pd := <-srv.delpeer:
 			// A peer disconnected.
+			if _, ok := immortal[pd.ID()]; ok {
+				srv.log.Error(fmt.Sprintf("immortal peer disconnected, peer:%+v", pd))
+			}
+
 			d := common.PrettyDuration(mclock.Now() - pd.created)
 			delete(peers, pd.ID())
 			srv.log.Debug("Removing p2p peer", "peercount", len(peers), "id", pd.ID(), "duration", d, "req", pd.requested, "err", pd.err)
@@ -1045,6 +1136,8 @@ func (srv *Server) runPeer(p *Peer) {
 		RemoteAddress: p.RemoteAddr().String(),
 		LocalAddress:  p.LocalAddr().String(),
 	})
+
+	p.EnablePingLatencyProbe(srv.EnablePingLatencyProbe)
 
 	// Run the per-peer main loop.
 	remoteRequested, err := p.run()

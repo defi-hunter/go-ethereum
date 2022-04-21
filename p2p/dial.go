@@ -92,6 +92,12 @@ var (
 //    continuously reads candidate nodes from its input iterator and attempts
 //    to create peer connections to nodes arriving through the iterator.
 //
+
+type ForceNode struct {
+	f bool
+	n *enode.Node
+}
+
 type dialScheduler struct {
 	dialConfig
 	setupFunc   dialSetupFunc
@@ -100,7 +106,7 @@ type dialScheduler struct {
 	ctx         context.Context
 	nodesIn     chan *enode.Node
 	doneCh      chan *dialTask
-	addStaticCh chan *enode.Node
+	addStaticCh chan *ForceNode
 	remStaticCh chan *enode.Node
 	addPeerCh   chan *conn
 	remPeerCh   chan *conn
@@ -170,7 +176,7 @@ func newDialScheduler(config dialConfig, it enode.Iterator, setupFunc dialSetupF
 		peers:       make(map[enode.ID]connFlag),
 		doneCh:      make(chan *dialTask),
 		nodesIn:     make(chan *enode.Node),
-		addStaticCh: make(chan *enode.Node),
+		addStaticCh: make(chan *ForceNode),
 		remStaticCh: make(chan *enode.Node),
 		addPeerCh:   make(chan *conn),
 		remPeerCh:   make(chan *conn),
@@ -190,9 +196,11 @@ func (d *dialScheduler) stop() {
 }
 
 // addStatic adds a static dial candidate.
-func (d *dialScheduler) addStatic(n *enode.Node) {
+func (d *dialScheduler) addStatic(force bool, n *enode.Node) {
+	n2 := &ForceNode {f: force, n: n}
+
 	select {
-	case d.addStaticCh <- n:
+	case d.addStaticCh <- n2:
 	case <-d.ctx.Done():
 	}
 }
@@ -276,15 +284,22 @@ loop:
 			d.updateStaticPool(c.node.ID())
 
 		case node := <-d.addStaticCh:
-			id := node.ID()
+			id := node.n.ID()
 			_, exists := d.static[id]
-			d.log.Trace("Adding static node", "id", id, "ip", node.IP(), "added", !exists)
 			if exists {
 				continue loop
+			} else {
+				d.log.Trace("Adding static node", "id", id, "ip", node.n.IP(), "added", !exists)
 			}
-			task := newDialTask(node, staticDialedConn)
+
+			flag := staticDialedConn
+			if node.f {
+				flag |= trustedConn
+			}
+
+			task := newDialTask(node.n, flag)
 			d.static[id] = task
-			if d.checkDial(node) == nil {
+			if d.checkDial(node.n) == nil {
 				d.addToStaticPool(task)
 			}
 
@@ -413,6 +428,17 @@ func (d *dialScheduler) checkDial(n *enode.Node) error {
 
 // startStaticDials starts n static dial tasks.
 func (d *dialScheduler) startStaticDials(n int) (started int) {
+	for started = 0; started < len(d.staticPool); {
+		idx := started
+		task := d.staticPool[idx]
+		if task.flags & trustedConn != 0 {
+			d.startDial(task)
+			d.removeFromStaticPool(idx)
+		} else {
+			started++
+		}
+	}
+
 	for started = 0; started < n && len(d.staticPool) > 0; started++ {
 		idx := d.rand.Intn(len(d.staticPool))
 		task := d.staticPool[idx]

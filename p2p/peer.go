@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"sort"
 	"sync"
@@ -46,6 +47,7 @@ const (
 	snappyProtocolVersion = 5
 
 	pingInterval = 15 * time.Second
+	pingInterval2 = 12 * time.Second
 )
 
 const (
@@ -117,6 +119,10 @@ type Peer struct {
 	// events receives message send / receive events if set
 	events   *event.Feed
 	testPipe *MsgPipeRW // for testing
+
+	connPingCount int
+	avgConnLatencyMs int64
+	enablePingLatencyProbe bool
 }
 
 // NewPeer returns a peer for testing purposes.
@@ -226,12 +232,17 @@ func newPeer(log log.Logger, conn *conn, protocols []Protocol) *Peer {
 		protoErr: make(chan error, len(protomap)+1), // protocols + pingLoop
 		closed:   make(chan struct{}),
 		log:      log.New("id", conn.node.ID(), "conn", conn.flags),
+		enablePingLatencyProbe: false,
 	}
 	return p
 }
 
 func (p *Peer) Log() log.Logger {
 	return p.log
+}
+
+func (p *Peer) EnablePingLatencyProbe(enable bool) {
+	p.enablePingLatencyProbe = enable
 }
 
 func (p *Peer) run() (remoteRequested bool, err error) {
@@ -241,6 +252,10 @@ func (p *Peer) run() (remoteRequested bool, err error) {
 		readErr    = make(chan error, 1)
 		reason     DiscReason // sent to the peer
 	)
+
+	p.connPingCount = 0
+	p.avgConnLatencyMs = 0
+
 	p.wg.Add(2)
 	go p.readLoop(readErr)
 	go p.pingLoop()
@@ -286,8 +301,11 @@ loop:
 
 func (p *Peer) pingLoop() {
 	ping := time.NewTimer(pingInterval)
+	ping2 := time.NewTimer(pingInterval2)
 	defer p.wg.Done()
 	defer ping.Stop()
+	defer ping2.Stop()
+
 	for {
 		select {
 		case <-ping.C:
@@ -296,6 +314,26 @@ func (p *Peer) pingLoop() {
 				return
 			}
 			ping.Reset(pingInterval)
+		case <-ping2.C:
+			if !p.enablePingLatencyProbe {
+				continue
+			}
+
+			s := time.Now()
+			addr := p.rw.fd.RemoteAddr()
+			c, err := net.Dial(addr.Network(), addr.String())
+			if err == nil {
+				lt := int64(time.Since(s).Milliseconds())
+				c.Close()
+				p.connPingCount++
+
+				if lt > 50 && math.Abs(float64(lt-p.avgConnLatencyMs)) > 10 {
+					log.Info("slow conn detected", "latency", lt, "addr", p.rw.fd.RemoteAddr().String())
+				}
+
+				p.avgConnLatencyMs = (int64(p.connPingCount-1)*p.avgConnLatencyMs+lt)/int64(p.connPingCount)
+			}
+			ping2.Reset(pingInterval2)
 		case <-p.closed:
 			return
 		}
@@ -316,6 +354,10 @@ func (p *Peer) readLoop(errc chan<- error) {
 			return
 		}
 	}
+}
+
+func (p *Peer) GetConnLatencyMs() int64 {
+	return p.avgConnLatencyMs
 }
 
 func (p *Peer) handle(msg Msg) error {

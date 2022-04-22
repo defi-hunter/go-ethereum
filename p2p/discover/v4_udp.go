@@ -50,7 +50,8 @@ var (
 const (
 	respTimeout    = 500 * time.Millisecond
 	expiration     = 20 * time.Second
-	bondExpiration = 24 * time.Hour
+	bondExpiration = 10 * time.Minute
+	//bondExpiration = 24 * time.Hour
 
 	maxFindnodeFailures = 5                // nodes exceeding this limit are dropped
 	ntpFailureThreshold = 32               // Continuous timeouts after which to check NTP
